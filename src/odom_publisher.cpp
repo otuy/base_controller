@@ -105,8 +105,8 @@ void OdomBroadcaster::TimerCallback(const ros::TimerEvent& event)
 #else
     pose_msg.pose.orientation = tf::createQuaternionMsgFromYaw(_yaw);
 
-    pose_msg.pose.position.x = _x;
-    pose_msg.pose.position.y = _y;
+    pose_msg.pose.position.x = -_y;
+    pose_msg.pose.position.y = _x;
 
     pose_msg.header.frame_id = odom_frame;
     pose_msg.header.stamp = ros::Time::now();

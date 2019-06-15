@@ -24,111 +24,256 @@
 
 //typedef actionlib::SimpleActionServer<base_controller::UselessPlannerAction> Server;
 
-class BSplineSegment
+class CubicSpline
 {
 private:
-    double foo(const double u, const double (&x)[4]) const
-    {
-        /*
-         * B_i(u) = b_(-1) * p_(i-1) + b_0 * p_i + b_1 * p_(i+1) + b_2 * p_(i+2)
-         * b_(-1) = (1-u)^3 / 6
-         * b_0 = u^3 / 2 - u^2 + 2 / 3
-         * b_1 = - u^3 / 2 + u^2 / 2 + u / 2 + 1 / 6
-         * b_2 = u^3 / 6
-         */
-
-        double b[4];
-        b[0] = (x[0] / 6.0) + (x[1] * 2.0 / 3.0) + (x[2] / 6.0);
-        b[1] = -(x[0] / 2.0) + (x[2] / 2.0);
-        b[2] = (x[0] / 2.0) - x[1] + (x[2] / 2.0);
-        b[3] = -(x[0] / 6.0) + (x[1] / 2.0) - (x[2] / 2.0) + (x[3] / 6.0);
-
-        return b[0] + (b[1] * u) + (b[2] * u * u) + (b[3] * u * u * u);
-    }
+    double pointsPerUnit_ = 100.0;
+    unsigned int skipPoints_ = 0;
 
 public:
-    double _x[4];
-    double _y[4];
-    double _z[4];
+    // CubicSpline(){
 
-    BSplineSegment(const double (&x)[4], const double (&y)[4], const double (&z)[4])
+    // }
+
+    void interpolatePath(
+        const nav_msgs::Path& path,
+        nav_msgs::Path& smoothedPath)
     {
-        for (int i = 0; i < 4; i++)
-        {
-            _x[i] = x[i];
-            _y[i] = y[i];
-            _z[i] = z[i];
-        }
+        smoothedPath.header = path.header;
+        interpolatePath(path.poses, smoothedPath.poses);
     }
 
-    void getPoint(const double u, double &x, double &y, double &z) const
+
+    void interpolatePath(
+        const std::vector<geometry_msgs::PoseStamped>& path,
+        std::vector<geometry_msgs::PoseStamped>& smoothedPath)
     {
-        x = this->foo(u, _x);
-        y = this->foo(u, _y);
-        z = this->foo(u, _z);
-    }
+        // clear new smoothed path vector in case it's not empty
+        smoothedPath.clear();
 
-    void getPointFromDistance(const double distance, double &x, double &y, double &z) const
-    {
-        double coarseLength = getLength(10);
+        // set skipPoints_ to 0 if the path contains has too few points
+        unsigned int oldSkipPoints = skipPoints_;
+        skipPoints_ = std::min<int>(path.size() - 2, skipPoints_);
 
-        int N = coarseLength * 10000;
+        // create cummulative distances vector
+        std::vector<double> cummulativeDistances;
+        calcCummulativeDistances(path, cummulativeDistances);
 
-        double length = 0.0;
+        // create temp pose
+        geometry_msgs::PoseStamped pose;
+        pose.header = path[0].header;
 
-        double last_x, last_y, last_z;
-        getPoint(0, last_x, last_y, last_z);
+        unsigned int numPoints = pointsPerUnit_ * calcTotalDistance(path);
 
-        for (int i = 0; i < N; i++)
+        smoothedPath.resize(numPoints);
+
+        ROS_INFO("numpoints:%d", numPoints);
+
+        // interpolate points on the smoothed path using the points in the original path
+        for (unsigned int i = 0; i < numPoints; i++)
         {
-            if (distance <= length)
-            {
-                x = last_x;
-                y = last_y;
-                return;
-            }
+        double u = static_cast<double>(i) / (numPoints-1);
+        interpolatePoint(path, cummulativeDistances, pose, u);
 
-            double t = (i + 1) * (1.0 / N);
-            double next_x, next_y, next_z;
-            getPoint(t, next_x, next_y, next_z);
-            length += hypot(next_x - last_x, next_y - last_y);
-            last_x = next_x;
-            last_y = next_y;
-            last_z = next_z;
-        }
-        getPoint(1.0, x, y, z);
-        ROS_ERROR("failed to get point from distance. (is distance(%lf) in range of this segment(%lf)?)", distance,
-                length);
-    }
-
-    double getLength(void) const
-    {
-        return getLength(getLength(10) * 10000);
-    }
-
-    double getLength(const int n) const
-    {
-        if (n <= 0)
-        {
-            ROS_ERROR("Cannot divide segment by n= %d. in file %s, line %d.", n, __FILE__, __LINE__);
+        // if (isnan(pose.pose.position.x) || isnan(pose.pose.position.y))
+        //     pose.pose = smoothedPath[std::max(static_cast<int>(i)-1, 0)].pose;
+        smoothedPath[i] = pose;
         }
 
-        double length = 0.0;
-        double last_x, last_y, last_z;
-        getPoint(0, last_x, last_y, last_z);
+        // copy start and goal orientations to smoothed path
+        smoothedPath.front().pose.orientation = path.front().pose.orientation;
+        smoothedPath.back().pose.orientation = path.back().pose.orientation;
 
-        for (int i = 0; i < n; i++)
+        // revert skipPoints to original value
+        skipPoints_ = oldSkipPoints;
+    }
+
+    void interpolatePoint(
+        const std::vector<geometry_msgs::PoseStamped>& path,
+        const std::vector<double>& cummulativeDistances,
+        geometry_msgs::PoseStamped& point,
+        double pointCummDist)
+    {
+        unsigned int group = findGroup(cummulativeDistances, pointCummDist);
+
+        double a = calcAlphaCoeff(path, cummulativeDistances, group, pointCummDist);
+        double b = calcBetaCoeff(path, cummulativeDistances, group, pointCummDist);
+        double c = calcGammaCoeff(path, cummulativeDistances, group, pointCummDist);
+        double d = calcDeltaCoeff(path, cummulativeDistances, group, pointCummDist);
+
+        std::vector<double> grad, nextGrad;
+        calcPointGradient(path, cummulativeDistances, group, grad);
+        calcPointGradient(path, cummulativeDistances, group+1, nextGrad);
+
+        point.pose.position.x =
+        + a * path[group*(skipPoints_+1)].pose.position.x
+        + b * path[(group+1)*(skipPoints_+1)].pose.position.x
+        + c * grad[0]
+        + d * nextGrad[0];
+
+        point.pose.position.y =
+        + a * path[group*(skipPoints_+1)].pose.position.y
+        + b * path[(group+1)*(skipPoints_+1)].pose.position.y
+        + c * grad[1]
+        + d * nextGrad[1];
+
+        double yaw;
+        yaw = 
+        + a * tf::getYaw(path[group*(skipPoints_+1)].pose.orientation)
+        + b * tf::getYaw(path[(group+1)*(skipPoints_+1)].pose.orientation)
+        + c * grad[2]
+        + d * nextGrad[2];
+
+        point.pose.orientation = tf::createQuaternionMsgFromYaw(yaw);
+    }
+
+    void calcCummulativeDistances(
+        const std::vector<geometry_msgs::PoseStamped> path,
+        std::vector<double>& cummulativeDistances)
+    {
+        cummulativeDistances.clear();
+        cummulativeDistances.push_back(0);
+
+        for (unsigned int i = skipPoints_+1; i < path.size(); i += skipPoints_+1)
+        cummulativeDistances.push_back(
+            cummulativeDistances.back()
+            + calcDistance(path, i) / calcTotalDistance(path));
+    }
+
+    double calcTotalDistance(
+        const std::vector<geometry_msgs::PoseStamped>& path)
+    {
+        double totalDist = 0;
+
+        for (unsigned int i = skipPoints_+1; i < path.size(); i += skipPoints_+1)
+        totalDist += calcDistance(path, i);
+
+        return totalDist;
+    }
+
+    double calcDistance(
+        const std::vector<geometry_msgs::PoseStamped>& path,
+        unsigned int idx)
+    {
+        if (idx <= 0 || idx >=path.size())
+        return 0;
+
+        double dist =
+        hypot(
+            path[idx].pose.position.x - path[idx-skipPoints_-1].pose.position.x,
+            path[idx].pose.position.y - path[idx-skipPoints_-1].pose.position.y);
+
+        return dist;
+    }
+
+    double calcAlphaCoeff(
+        const std::vector<geometry_msgs::PoseStamped> path,
+        const std::vector<double> cummulativeDistances,
+        unsigned int idx,
+        double input)
+    {
+        double alpha =
+        + 2 * pow(calcRelativeDistance(cummulativeDistances, idx, input), 3)
+        - 3 * pow(calcRelativeDistance(cummulativeDistances, idx, input), 2)
+        + 1;
+        return alpha;
+    }
+
+    double calcBetaCoeff(
+        const std::vector<geometry_msgs::PoseStamped> path,
+        const std::vector<double> cummulativeDistances,
+        unsigned int idx,
+        double input)
+    {
+        double beta =
+        - 2 * pow(calcRelativeDistance(cummulativeDistances, idx, input), 3)
+        + 3 * pow(calcRelativeDistance(cummulativeDistances, idx, input), 2);
+        return beta;
+    }
+
+    double calcGammaCoeff(
+        const std::vector<geometry_msgs::PoseStamped> path,
+        const std::vector<double> cummulativeDistances,
+        unsigned int idx,
+        double input)
+    {
+        double gamma =
+        (pow(calcRelativeDistance(cummulativeDistances, idx, input), 3)
+        - 2 * pow(calcRelativeDistance(cummulativeDistances, idx, input), 2))
+        * (cummulativeDistances[idx+1] - cummulativeDistances[idx])
+        + input
+        - cummulativeDistances[idx];
+        return gamma;
+    }
+
+    double calcDeltaCoeff(
+        const std::vector<geometry_msgs::PoseStamped> path,
+        const std::vector<double> cummulativeDistances,
+        unsigned int idx,
+        double input)
+    {
+        double delta =
+        (pow(calcRelativeDistance(cummulativeDistances, idx, input), 3)
+        - pow(calcRelativeDistance(cummulativeDistances, idx, input), 2))
+        * (cummulativeDistances[idx+1] - cummulativeDistances[idx]);
+        return delta;
+    }
+
+    double calcRelativeDistance(
+        const std::vector<double>& cummulativeDistances,
+        const unsigned int idx,
+        const double input)
+    {
+        double relDist =
+        (input - cummulativeDistances[idx])
+        / (cummulativeDistances[idx+1] - cummulativeDistances[idx]);
+        return relDist;
+    }
+
+
+    void calcPointGradient(
+        const std::vector<geometry_msgs::PoseStamped>& path,
+        const std::vector<double>& cummulativeDistances,
+        unsigned int idx,
+        std::vector<double>& gradient)
+    {
+        double dx, dy, dth, du;
+        gradient.assign(3, 0);
+
+        if (idx == 0 || idx == cummulativeDistances.size()-1)
+        return;
+
+        dx = path[(idx)*(skipPoints_+1)].pose.position.x - path[(idx-1)*(skipPoints_+1)].pose.position.x;
+        dy = path[(idx)*(skipPoints_+1)].pose.position.y - path[(idx-1)*(skipPoints_+1)].pose.position.y;
+        dth = tf::getYaw(path[(idx)*(skipPoints_+1)].pose.orientation) - tf::getYaw(path[(idx-1)*(skipPoints_+1)].pose.orientation);
+        du = cummulativeDistances[idx] - cummulativeDistances[idx-1];
+
+        if (dth >= M_PI)
         {
-            double next_x, next_y, next_z;
-            getPoint((i + 1) * (1.0 / n), next_x, next_y, next_z);
-
-            length += hypot(next_x - last_x, next_y - last_y);
-            last_x = next_x;
-            last_y = next_y;
-            last_z = next_z;
+        dth -= (2 * M_PI);
+        }
+        else if (dth < -M_PI)
+        {
+        dth += (2 * M_PI);
         }
 
-        return length;
+        gradient[0] = dx / du;
+        gradient[1] = dy / du;
+        gradient[2] = dth / du;
+    }
+
+
+    unsigned int findGroup(
+        const std::vector<double>& cummulativeDistances,
+        double pointCummDist)
+    {
+        unsigned int i;
+        for (i = 0; i < cummulativeDistances.size()-1; i++)
+        {
+            if (pointCummDist <= cummulativeDistances[i+1])
+                return i;
+        }
+        return i;
     }
 };
 
@@ -148,6 +293,7 @@ private:
     void LinToleranceCallback(const std_msgs::Float64::ConstPtr& msg);
     void AngToleranceCallback(const std_msgs::Float64::ConstPtr& msg);
     void TimerCallback(const ros::TimerEvent& event);
+    void ManualCallback(const std_msgs::Bool::ConstPtr& msg);
     //void CalcWheelSpeed(double actualDt);
 
     inline double getYawFromQuat(const geometry_msgs::Quaternion& quat)
@@ -197,12 +343,14 @@ private:
     double control_interval = 1 / 20.0;
 
     bool planning = false;
+    bool _is_manual_enabled = false;
 
     //double MaximumVelocity;
 
     ros::Subscriber path_sub;
     ros::Subscriber odom_sub;
     ros::Subscriber abort_sub;
+    ros::Subscriber manual_sub;
 
     //ros::Subscriber lin_goal_tolerance_sub;
     //ros::Subscriber ang_goal_tolerance_sub;
@@ -294,6 +442,7 @@ UselessPlanner::UselessPlanner(std::string name)// :
     //odom_sub = nh.subscribe<geometry_msgs::PoseWithCovarianceStamped>("amcl_pose", 10, &UselessPlanner::PoseCallback, this);
 
     abort_sub = nh_.subscribe<std_msgs::Bool>("abort", 10, &UselessPlanner::AbortCallback, this);
+    manual_sub = nh_.subscribe<std_msgs::Bool>("manual", 10, &UselessPlanner::ManualCallback, this);
 
     //lin_goal_tolerance_sub = nh.subscribe<std_msgs::Float64>("lin_tolerance", 10, &UselessPlanner::LinToleranceCallback, this);
     //ang_goal_tolerance_sub = nh.subscribe<std_msgs::Float64>("ang_tolerance", 10, &UselessPlanner::AngToleranceCallback, this);
@@ -308,69 +457,7 @@ UselessPlanner::UselessPlanner(std::string name)// :
 
     //Server server(uselessPlanner->nh, "do_dishes", boost::bind(&UselessPlanner::execute_action, uselessPlanner, _1, &server), false);
     //server.start();
-
-#if 0
-
-    //path_pub = nh_.advertise<nav_msgs::Path>("target_path", 1, true);
-
-    target_path.header.frame_id = "map";
-    target_path.header.stamp = ros::Time::now();
-
-    std::vector<geometry_msgs::PoseStamped> _poses;
-    //_poses.clear();
-
-    double x = 0.0;
-    double y = 0.0;
-
-    geometry_msgs::PoseStamped _pose;
-
-    //_pose.header.frame_id = "map";
-    //_pose.header.stamp = ros::Time::now();
-
-    _pose.header.frame_id = "map";
-    _pose.header.stamp = ros::Time::now();
-
-    _pose.pose.position.x = 0.045286;
-    _pose.pose.position.y = 0;
-    _pose.pose.orientation.z = 0;
-    _pose.pose.orientation.w = 1;
-    _poses.push_back(_pose);
-
-    _pose.pose.position.x = 0.33;
-    _pose.pose.position.y = 1.1;
-    _pose.pose.orientation.z = 0;
-    _pose.pose.orientation.w = 1;
-    _poses.push_back(_pose);
-
-    _pose.pose.position.x = 0.825;
-    _pose.pose.position.y = 0.90;
-    _pose.pose.orientation.z = 0;
-    _pose.pose.orientation.w = 1;
-    _poses.push_back(_pose);
-
-    _pose.pose.position.x = 0.825;
-    _pose.pose.position.y = 0.700;
-    _pose.pose.orientation.z = 0;
-    _pose.pose.orientation.w = 1;
-    _poses.push_back(_pose);
-
-    _pose.pose.position.x = 0.825;
-    _pose.pose.position.y = 0.350;
-    _pose.pose.orientation.z = 0;
-    _pose.pose.orientation.w = 1;
-    _poses.push_back(_pose);
-
-    target_path.poses = _poses;
-    path_pub.publish(target_path);
-#endif
 }
-
-/*
-void UselessPlanner::execute_action(const base_controller::UselessPlannerActionGoalConstPtr& goal, Server* as)
-{
-
-}
-*/
 
 void UselessPlanner::PathCallback(const nav_msgs::Path::ConstPtr& msg)
 {
@@ -378,71 +465,36 @@ void UselessPlanner::PathCallback(const nav_msgs::Path::ConstPtr& msg)
 
     this->fine_target_path.poses.clear();
 
-    std::vector<geometry_msgs::PoseStamped> poses(msg->poses);
-    std::vector<geometry_msgs::PoseStamped> fine_poses;
+    // std::vector<geometry_msgs::PoseStamped> poses(msg->poses);
+    // std::vector<geometry_msgs::PoseStamped> fine_poses;
 
-    poses.insert(poses.begin(), 2, poses.front());
-    poses.push_back(poses.back());
-    poses.push_back(poses.back());
+    // poses.insert(poses.begin(), 2, poses.front());
+    // poses.push_back(poses.back());
+    // poses.push_back(poses.back());
+
+    this->target_path = *msg;
 
     ROS_INFO("received path msg.");
 
-    ROS_INFO("path has %ld poses", poses.size());
+    ROS_INFO("path has %ld poses", target_path.poses.size());
 
     //std::vector<BSplineSegment> segments;
     geometry_msgs::PoseStamped pose;
     pose.header.frame_id = "map";
     pose.header.stamp = ros::Time::now();
 
-    for (int i = 3; i < poses.size(); i++)
-    {
-        //ROS_INFO("constructing paths: %d", i);
-        double _x[4];
-        double _y[4];
-        double _z[4];
-
-        _x[0] = poses.at(i - 3).pose.position.x;
-        _y[0] = poses.at(i - 3).pose.position.y;
-        _z[0] = tf::getYaw(poses.at(i - 3).pose.orientation);
-
-        _x[1] = poses.at(i - 2).pose.position.x;
-        _y[1] = poses.at(i - 2).pose.position.y;
-        _z[1] = tf::getYaw(poses.at(i - 2).pose.orientation);
-
-        _x[2] = poses.at(i - 1).pose.position.x;
-        _y[2] = poses.at(i - 1).pose.position.y;
-        _z[2] = tf::getYaw(poses.at(i - 1).pose.orientation);
-
-        _x[3] = poses.at(i).pose.position.x;
-        _y[3] = poses.at(i).pose.position.y;
-        _z[3] = tf::getYaw(poses.at(i).pose.orientation);
-
-        BSplineSegment bspline(_x, _y, _z);
-
-        //segments.push_back(bspline);
-
-        int div = bspline.getLength(100) * 100 + 1;
-
-        for (int u = 0; u < div; u++)
-        {
-            double x, y, z;
-            bspline.getPoint(u / (double) div, x, y, z);
-            pose.pose.position.x = x;
-            pose.pose.position.y = y;
-            pose.pose.orientation = tf::createQuaternionMsgFromYaw(z);
-            fine_poses.push_back(pose);
-        }
-    }
+    CubicSpline cubicspline;
+    cubicspline.interpolatePath(target_path, fine_target_path);
 
     double totalLength = 0.0;
     /*
-     for(auto it = fine_poses.begin() + 1; it < fine_poses.end(); it++)
-     {
-     double delta_x = (it->pose.position.x - (it - 1)->pose.position.x);
-     double delta_y = (it->pose.position.y - (it - 1)->pose.position.y);
-     double l = hypot(delta_x, delta_y);
-     totalLength += l;
-     }
+    for(auto it = fine_poses.begin() + 1; it < fine_poses.end(); it++)
+    {
+        double delta_x = (it->pose.position.x - (it - 1)->pose.position.x);
+        double delta_y = (it->pose.position.y - (it - 1)->pose.position.y);
+        double l = hypot(delta_x, delta_y);
+        totalLength += l;
+    }
      */
 
 #if 0
@@ -530,14 +582,14 @@ void UselessPlanner::PathCallback(const nav_msgs::Path::ConstPtr& msg)
     this->current_goal_index = 0;
     this->current_waypoint_index = 0;
 
-    if (fine_poses.size() <= 0)
+    if (fine_target_path.poses.size() <= 0)
     {
         return;
     }
 
     this->fine_target_path.header.frame_id = "map";
     this->fine_target_path.header.stamp = ros::Time::now();
-    this->fine_target_path.poses = fine_poses;
+    // this->fine_target_path.poses = fine_poses;
 
     this->fine_path_pub.publish(this->fine_target_path);
     ROS_INFO("fine path has %ld poses", fine_target_path.poses.size());
@@ -571,8 +623,18 @@ void UselessPlanner::AbortCallback(const std_msgs::Bool::ConstPtr& msg)
     }
 }
 
+void UselessPlanner::ManualCallback(const std_msgs::Bool::ConstPtr& msg)
+{
+    this->_is_manual_enabled = msg->data;
+}
+
 void UselessPlanner::TimerCallback(const ros::TimerEvent& event)
 {
+    if(this->_is_manual_enabled)
+    {
+        return;
+    }
+
     if (fine_target_path.poses.size() <= 0l)
     {
         //ROS_INFO("paths size: %ld", fine_target_path.poses.size());
@@ -865,17 +927,17 @@ void UselessPlanner::TimerCallback(const ros::TimerEvent& event)
     }
 
     /*
-     double vel_norm = hypot(vel_world_x, vel_world_y);
-     if(vel_norm > this->vel_lim_lin)
-     {
-     double r = this->vel_lim_lin / vel_norm;
-     vel_world_x *= r;
-     vel_world_y *= r;
-     }
+    double vel_norm = hypot(vel_world_x, vel_world_y);
+    if(vel_norm > this->vel_lim_lin)
+    {
+        double r = this->vel_lim_lin / vel_norm;
+        vel_world_x *= r;
+        vel_world_y *= r;
+    }
 
-     double yaw = this->last_pose_msg.theta;
-     double vel_x = (vel_world_x * cos(-yaw)) - (vel_world_y * sin(-yaw));
-     double vel_y = (vel_world_x * sin(-yaw)) + (vel_world_y * cos(-yaw));
+    double yaw = this->last_pose_msg.theta;
+    double vel_x = (vel_world_x * cos(-yaw)) - (vel_world_y * sin(-yaw));
+    double vel_y = (vel_world_x * sin(-yaw)) + (vel_world_y * cos(-yaw));
      */
     // accel. limit
 #define ACCEL_LIMIT
@@ -913,9 +975,8 @@ int main(int argc, char** argv)
     ros::init(argc, argv, "useless_planner");
 
     UselessPlanner *uselessPlanner = new UselessPlanner(ros::this_node::getName());
-    ROS_INFO("useless_planner node has started.");
+    ROS_INFO("cubic_spline_planner node has started.");
 
     ros::spin();
-    ROS_INFO("useless_planner node has been terminated.");
+    ROS_INFO("cubic_spline_planner node has been terminated.");
 }
-

@@ -31,16 +31,47 @@ private:
     double max_ang;
     double max_ang_turbo;
 
-    static int AxisLeftThumbX;
-    static int AxisLeftThumbY;
-    static int AxisRightThumbX;
-    static int ButtonRB;
+    static int ButtonA;
+	static int ButtonB;
+	static int ButtonX;
+	static int ButtonY;
+	static int ButtonLB;
+	static int ButtonRB;
+	static int ButtonSelect;
+	static int ButtonStart;
+	static int ButtonLeftThumb;
+	static int ButtonRightThumb;
+
+	static int AxisDPadX;
+	static int AxisDPadY;
+	static int AxisLeftThumbX;
+	static int AxisLeftThumbY;
+	static int AxisRightThumbX;
+    static int AxisRightThumbY;
+    static int AxisLeftTrigger;
+    static int AxisRightTrigger;
 };
 
-int BaseTeleop::AxisLeftThumbX = 0;
-int BaseTeleop::AxisLeftThumbY = 1;
-int BaseTeleop::AxisRightThumbX = 2;
-int BaseTeleop::ButtonRB = 7;
+int BaseTeleop::ButtonA = 0;
+int BaseTeleop::ButtonB = 1;
+int BaseTeleop::ButtonX = 2;
+int BaseTeleop::ButtonY = 3;
+int BaseTeleop::ButtonLB = 4;
+int BaseTeleop::ButtonRB = 5;
+int BaseTeleop::ButtonSelect = 6;
+int BaseTeleop::ButtonStart = 7;
+int BaseTeleop::ButtonLeftThumb = 9;
+int BaseTeleop::ButtonRightThumb = 10;
+
+int BaseTeleop::AxisDPadX = 0;
+int BaseTeleop::AxisDPadY = 1;
+int BaseTeleop::AxisLeftThumbX = 6;
+int BaseTeleop::AxisLeftThumbY = 7;
+int BaseTeleop::AxisRightThumbX = 3;
+int BaseTeleop::AxisRightThumbY = 4;
+int BaseTeleop::AxisLeftTrigger = 2;
+int BaseTeleop::AxisRightTrigger = 5;
+
 
 BaseTeleop::BaseTeleop()
 {
@@ -52,6 +83,9 @@ BaseTeleop::BaseTeleop()
     nh_.getParam("AxisLeftThumbX", AxisLeftThumbX);
     nh_.getParam("AxisLeftThumbY", AxisLeftThumbY);
     nh_.getParam("AxisRightThumbX", AxisRightThumbX);
+    nh_.getParam("AxisRightThumbY", AxisRightThumbY);
+    nh_.getParam("AxisLeftTriger", AxisLeftTrigger);
+    nh_.getParam("AxisRightTriger", AxisRightTrigger);
     nh_.getParam("ButtonRB", ButtonRB);
 
     auto _nh = ros::NodeHandle("~");
@@ -71,9 +105,15 @@ void BaseTeleop::joyCallback(const sensor_msgs::Joy::ConstPtr& joy)
 {
     geometry_msgs::Twist twist;
 
-    double vel_x = joy->axes[AxisLeftThumbY];
-    double vel_y = joy->axes[AxisLeftThumbX];
-    double vel_z = joy->axes[AxisRightThumbX];
+    // double vel_x = joy->axes[AxisLeftThumbY];
+    // double vel_y = joy->axes[AxisLeftThumbX];
+    // double vel_z = joy->axes[AxisRightThumbX];
+
+    double vel_x = joy->axes[AxisRightThumbY];
+    double vel_y = joy->axes[AxisRightThumbX];
+    double vel_z_l = (joy->axes[AxisLeftTrigger] - 1.0) * (1.0 - 0.0) / (- 1.0 - 1.0) + 0.0;
+    double vel_z_r = (joy->axes[AxisRightTrigger] - 1.0) * (- 1.0 - 0.0) / (- 1.0 - 1.0) + 0.0;
+    double vel_z = vel_z_l + vel_z_r;
 
     double vel_norm = hypot(vel_x, vel_y);
     if (vel_norm > 1.0)

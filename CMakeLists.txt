@@ -229,4 +229,8 @@ target_link_libraries(crude_planner ${catkin_LIBRARIES})
 add_executable(odom_publisher src/odom_publisher.cpp)
 target_link_libraries(odom_publisher ${catkin_LIBRARIES})
 
+add_executable(base_controller_4wheel src/base_controller_4wheel.cpp)
+target_link_libraries(base_controller_4wheel ${catkin_LIBRARIES})
 
+add_executable(cubic_spline_planner src/cubic_spline_planner.cpp)
+target_link_libraries(cubic_spline_planner ${catkin_LIBRARIES})
